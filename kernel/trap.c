@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -29,6 +33,19 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+// Check the page fault for the mmap.
+struct vma *CheckFault(uint64 fa) {
+  struct vma * v;
+  for (int i = 0; i < NOMAP; i++) {
+    if (myproc()->mr_[i] != 0) {
+      v = myproc()->mr_[i];
+      if (fa >= v->addr_ && fa < v->addr_ + v->size_) {
+        return v;
+      }
+    }
+  }
+  return (struct vma *)-1;
+}
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -67,7 +84,36 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if (r_scause() == 13 || r_scause() == 15) {
+    struct vma * tvma;
+    if ((tvma = CheckFault(r_stval())) == (struct vma*)-1) {
+      goto fault;
+    }
+    uint64 startaddr = PGROUNDDOWN(r_stval());
+    char *mem;
+    if ((mem = kalloc()) == 0) {
+      goto fault;
+    }
+    memset(mem, 0, PGSIZE);
+    // install the file  area to the mem area.
+    uint64 offset = startaddr - tvma->addr_;
+    ilock(tvma->of_->ip);
+    readi(tvma->of_->ip, 0, (uint64)mem, offset, 4096);
+    iunlock(tvma->of_->ip);
+    // Get the permission bit.
+    int perm = 0;
+    if (tvma->protlevel_ & PROT_READ) perm |= PTE_R;
+    if (tvma->protlevel_ & PROT_WRITE) perm |= PTE_W;
+    if (tvma->protlevel_ & PROT_EXEC) perm |= PTE_X;
+    perm |= PTE_U;
+    if (mappages(myproc()->pagetable, startaddr, PGSIZE, (uint64)mem, perm) != 0) {
+      kfree(mem);
+      goto fault;
+    }
+    // p->trapframe->epc -= 4;
+
   } else {
+    fault:
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     p->killed = 1;
@@ -82,6 +128,7 @@ usertrap(void)
 
   usertrapret();
 }
+
 
 //
 // return to user space

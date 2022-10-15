@@ -116,9 +116,8 @@ mmap_test(void)
   _v1(p);
   if (munmap(p, PGSIZE*2) == -1)
     err("munmap (1)");
-
   printf("test mmap f: OK\n");
-    
+
   printf("test mmap private\n");
   // should be able to map file opened read-only with private writable
   // mapping
@@ -229,6 +228,7 @@ mmap_test(void)
 
   if(memcmp(p1, "12345", 5) != 0)
     err("mmap1 mismatch");
+  printf("mmap1 succeeded\n");
   if(memcmp(p2, "67890", 5) != 0)
     err("mmap2 mismatch");
 
@@ -271,9 +271,9 @@ fork_test(void)
   // read just 2nd page.
   if(*(p1+PGSIZE) != 'A')
     err("fork mismatch (1)");
-
   if((pid = fork()) < 0)
     err("fork");
+
   if (pid == 0) {
     _v1(p1);
     munmap(p1, PGSIZE); // just the first page
@@ -282,7 +282,6 @@ fork_test(void)
 
   int status = -1;
   wait(&status);
-
   if(status != 0){
     printf("fork_test failed\n");
     exit(1);

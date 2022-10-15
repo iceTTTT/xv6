@@ -5,12 +5,18 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
 
 struct proc *initproc;
+
+struct vma vmas[MAXVMA]; 
+
 
 int nextpid = 1;
 struct spinlock pid_lock;
@@ -78,6 +84,41 @@ myproc(void) {
   struct proc *p = c->proc;
   pop_off();
   return p;
+}
+// Allocate a vma in vma table for a process. Call with lock hold.
+struct vma*
+Allocvma() {
+  for (int i = 0; i != MAXVMA; i++) {
+    if (vmas[i].inuse_ == 0) {
+      vmas[i].inuse_ = 1;
+      return &vmas[i]; 
+    }
+  }
+  return (struct vma*)-1;
+}
+
+void Deallocvma(struct vma *v) {
+  for (int i = 0; i != MAXVMA; i++) {
+    if (&vmas[i] == v) {
+      vmas[i].inuse_ = 0;
+      break;
+    }
+  }
+}
+// allocate a map descriptor.
+int
+Mralloc(struct vma *vma_)
+{
+  int md;
+  struct proc *p = myproc();
+
+  for(md = 0; md < NOMAP; md++){
+    if(p->mr_[md] == 0){
+      p->mr_[md] = vma_;
+      return md;
+    }
+  }
+  return -1;
 }
 
 int
@@ -294,6 +335,13 @@ fork(void)
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
+  // Concurrecy not concern.
+  for (i = 0; i<NOMAP; i++)
+    if (p->mr_[i])
+    { 
+      np->mr_[i] = p->mr_[i];
+      p->mr_[i]->of_->ref++;
+    }
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
@@ -352,7 +400,26 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
-
+  // Unmap all remaining mapped region.
+  for (int i = 0; i < NOMAP; i++) {
+    if (p->mr_[i] != 0) {
+      // Unmap.
+      uint64 start = p->mr_[i]->addr_;
+      int size = p->mr_[i]->size_;
+      while (size > 0) {
+        size -= 4096;
+        pte_t *pte;
+        int mapped = 1;
+        if((pte = walk(myproc()->pagetable, start, 0)) == 0) panic("uvmunmap: walk");
+        if((*pte & PTE_V) == 0) mapped = 0;
+        if (mapped) uvmunmap(p->pagetable, start, 1, 1);  
+        start += 4096;
+      }
+      p->mr_[i]->of_->ref--;
+      Deallocvma(p->mr_[i]);
+      p->mr_[i] = 0;
+    }
+  }
   begin_op();
   iput(p->cwd);
   end_op();
@@ -411,7 +478,6 @@ wait(uint64 addr)
   // hold p->lock for the whole time to avoid lost
   // wakeups from a child's exit().
   acquire(&p->lock);
-
   for(;;){
     // Scan through table looking for exited children.
     havekids = 0;
